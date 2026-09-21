@@ -14,7 +14,7 @@ export default async function handler(req, res) {
   try {
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: "gemini-3.6-flash",
       contents: prompt,
       config: {
         systemInstruction: "You are an expert AI legal assistant specializing in UAE Laws. Users can ask questions in English or Bangla regarding UAE laws, labor rules (MOHRE), and Dubai regulations. Cross-verify information using up-to-date sources like Khaleej Times, Gulf News, Dubai Now, and MOHRE. Keep answers extremely concise, structured, and strictly within 3 to 5 lines (maximum 10 lines) optimized for mobile reading.",
