@@ -8,6 +8,9 @@ export default async function handler(req, res) {
   if (!prompt || typeof prompt !== "string") {
     return res.status(400).json({ error: "Missing prompt" });
   }
+  if (!process.env.GEMINI_API_KEY) {
+    return res.status(500).json({ error: "SERVER_CONFIG: GEMINI_API_KEY env variable is not set on this Vercel project" });
+  }
   try {
     const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
     const response = await ai.models.generateContent({
@@ -20,6 +23,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ text: response.text });
   } catch (error) {
     console.error("Gemini API Error:", error);
-    return res.status(500).json({ error: "AI request failed" });
+    const message = error && error.message ? error.message : String(error);
+    return res.status(500).json({ error: "GEMINI_ERROR: " + message });
   }
 }
