@@ -8,15 +8,24 @@ body {
   @apply bg-slate-950 text-slate-100 antialiased;
 }
 
-/* Continuous scrolling marquee for the bilingual instruction strip */
+/* Continuous scrolling marquee — two identical spans slide left in a loop.
+   The track is twice the content width, so -50% lands exactly where it started. */
 .marquee-track {
   display: inline-flex;
   white-space: nowrap;
-  animation: marquee 18s linear infinite;
+  animation: marquee-scroll 20s linear infinite;
   will-change: transform;
 }
 
-@keyframes marquee {
-  from { transform: translateX(0); }
-  to { transform: translateX(-50%); }
+.marquee-track > span {
+  flex: none;
+  padding-right: 2rem;
+  font-size: 11px;
+  line-height: 1.25;
+  color: #cbd5e1; /* slate-300 */
+}
+
+@keyframes marquee-scroll {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
 }
