@@ -9,7 +9,7 @@ const SUGGESTIONS = [
 ];
 
 const TICKER =
-  'আপনার প্রশ্নটি মেসেজ বক্সে করুন · Drop your message in the message box · ';
+  'আপনার প্রশ্নটি মেসেজ বক্সে করুন  •  Drop your message in the message box  •  ';
 
 export default function App() {
   const [messages, setMessages] = useState([
@@ -25,29 +25,22 @@ export default function App() {
   const [micError, setMicError] = useState('');
 
   const bottomRef = useRef(null);
-  const recognitionRef = useRef(null);
-  const transcriptRef = useRef(''); // finalized text captured this session
-  const sendingAfterStopRef = useRef(false);
-
-  const SpeechRecognition =
-    typeof window !== 'undefined'
-      ? window.SpeechRecognition || window.webkitSpeechRecognition
-      : null;
+  const recRef = useRef(null);
+  const finalTextRef = useRef('');
+  const autoSendRef = useRef(false);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, loading]);
 
-  useEffect(() => {
-    return () => {
-      try { recognitionRef.current?.abort(); } catch {}
-    };
+  useEffect(() => () => {
+    try { recRef.current?.abort(); } catch {}
   }, []);
 
   async function send(text) {
     const prompt = (text ?? input).trim();
     if (!prompt || loading) return;
-    stopMic(false);
+    stopRecording(false);
     setInput('');
     setMessages((m) => [...m, { role: 'user', text: prompt }]);
     setLoading(true);
@@ -64,17 +57,17 @@ export default function App() {
     }
   }
 
-  function stopMic(andSend) {
-    const rec = recognitionRef.current;
-    recognitionRef.current = null;
+  function stopRecording(sendIt) {
+    autoSendRef.current = Boolean(sendIt);
+    const rec = recRef.current;
+    recRef.current = null;
     setListening(false);
     if (rec) {
-      sendingAfterStopRef.current = Boolean(andSend);
       rec.onend = () => {
-        const heard = transcriptRef.current.trim();
-        transcriptRef.current = '';
-        if (sendingAfterStopRef.current && heard) {
-          sendingAfterStopRef.current = false;
+        const heard = finalTextRef.current.trim();
+        finalTextRef.current = '';
+        if (autoSendRef.current && heard) {
+          autoSendRef.current = false;
           send(heard);
         }
       };
@@ -82,49 +75,26 @@ export default function App() {
     }
   }
 
-  async function toggleMic() {
+  function toggleMic() {
     setMicError('');
-    if (!SpeechRecognition) {
-      setMicError('Voice input is not supported in this browser. Please use Chrome or Safari.');
-      return;
-    }
     if (listening) {
-      stopMic(true); // stop and auto-send whatever was heard
+      stopRecording(true); // stop + auto-send what was heard
       return;
     }
 
-    // 1) Explicitly ask for microphone permission first — without this,
-    //    some browsers (iOS Safari) silently refuse recognition.start().
-    try {
-      if (navigator.mediaDevices?.getUserMedia) {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        stream.getTracks().forEach((t) => t.stop());
-      }
-    } catch (err) {
-      setMicError(
-        err?.name === 'NotAllowedError'
-          ? 'Microphone access was denied. Please allow the microphone in your browser settings and try again.'
-          : 'Could not access the microphone. Please try again.'
-      );
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      setMicError('Voice input is not supported in this browser. On iPhone use Safari, on other devices use Chrome.');
       return;
     }
 
-    // 2) Start speech recognition.
-    let rec;
-    try {
-      rec = new SpeechRecognition();
-    } catch {
-      setMicError('Voice input could not start in this browser.');
-      return;
-    }
-    recognitionRef.current = rec;
-    transcriptRef.current = '';
+    const rec = new SR();
+    recRef.current = rec;
+    finalTextRef.current = '';
 
     rec.lang = micLang;
     rec.interimResults = true;
-    // NOTE: continuous=false is far more reliable on iOS Safari; we restart
-    // in onend while the user keeps listening.
-    rec.continuous = false;
+    rec.continuous = false; // most reliable on iOS Safari; onend restarts below
     rec.maxAlternatives = 1;
 
     rec.onstart = () => setListening(true);
@@ -134,38 +104,38 @@ export default function App() {
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const r = event.results[i];
         if (r.isFinal) {
-          transcriptRef.current = (transcriptRef.current + ' ' + r[0].transcript).trim();
+          finalTextRef.current = (finalTextRef.current + ' ' + r[0].transcript).trim();
         } else {
           interim += r[0].transcript;
         }
       }
-      const shown = (transcriptRef.current + ' ' + interim).trim();
+      const shown = (finalTextRef.current + ' ' + interim).trim();
       if (shown) setInput(shown);
     };
 
     rec.onerror = (event) => {
       const code = event?.error || '';
       if (code === 'not-allowed' || code === 'service-not-allowed') {
-        setMicError('Microphone permission denied. Enable it in Settings > Safari and retry.');
+        setMicError('Microphone blocked. On iPhone: Settings > Apps > Safari > Microphone > Allow, then retry.');
       } else if (code === 'network') {
-        setMicError('Speech service needs internet — check your connection.');
+        setMicError('Speech service needs internet — check your connection and retry.');
+      } else if (code === 'audio-capture') {
+        setMicError('No microphone found on this device.');
       } else if (code === 'language-not-supported') {
-        setMicError('That language is not supported on this device. Try the other one.');
+        setMicError('This language is not supported on your device — switch EN/বাং and retry.');
+      } else if (code !== 'no-speech' && code !== 'aborted') {
+        setMicError('Voice input error (' + code + '). Please try again.');
       }
-      // 'no-speech' / 'aborted' are harmless; ignore them.
       if (code !== 'no-speech' && code !== 'aborted') {
-        recognitionRef.current = null;
+        recRef.current = null;
         setListening(false);
       }
     };
 
     rec.onend = () => {
-      // Keep listening across engine restarts until the user taps stop.
-      if (recognitionRef.current === rec) {
-        try {
-          rec.start();
-          return;
-        } catch {}
+      // If still active, the engine just timed out on silence — restart it.
+      if (recRef.current === rec) {
+        try { rec.start(); return; } catch {}
       }
       setListening(false);
     };
@@ -173,21 +143,21 @@ export default function App() {
     try {
       rec.start();
     } catch {
-      recognitionRef.current = null;
+      recRef.current = null;
       setMicError('Voice input could not start. Please try again.');
     }
   }
 
   return (
-    <div className="flex h-full flex-col bg-slate-950">
+    <div className="flex h-dvh flex-col overflow-hidden bg-slate-950">
       <header className="sticky top-0 z-10 border-b border-slate-800 bg-slate-900/90 backdrop-blur">
-        <div className="mx-auto flex max-w-3xl items-center gap-3 px-4 py-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-emerald-500/20 text-lg">⚖️</div>
-          <div className="flex-1">
-            <h1 className="text-base font-semibold sm:text-lg">UAE Law AI Assistant</h1>
-            <p className="text-xs text-slate-400">UAE Laws · MOHRE · Dubai Regulations</p>
+        <div className="mx-auto flex w-full max-w-3xl items-center gap-3 px-4 py-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-500/20 text-lg">⚖️</div>
+          <div className="min-w-0 flex-1">
+            <h1 className="truncate text-base font-semibold sm:text-lg">UAE Law AI Assistant</h1>
+            <p className="truncate text-xs text-slate-400">UAE Laws · MOHRE · Dubai Regulations</p>
           </div>
-          <span className="flex items-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-emerald-400">
+          <span className="flex shrink-0 items-center gap-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-emerald-400">
             <span className="relative flex h-2 w-2">
               <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>
               <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500"></span>
@@ -195,20 +165,20 @@ export default function App() {
             Live
           </span>
         </div>
-        {/* Continuous scrolling marquee */}
-        <div className="overflow-hidden border-t border-slate-800/60 bg-slate-900/70 py-1.5" dir="ltr">
+        {/* Scrolling marquee — full-width, clipped, never overflows */}
+        <div className="w-full overflow-hidden border-t border-slate-800/60 bg-slate-900/70" dir="ltr">
           <div className="marquee-track">
-            <span>{TICKER.repeat(4)}</span>
-            <span aria-hidden="true">{TICKER.repeat(4)}</span>
+            <span className="marquee-chunk">{TICKER.repeat(3)}</span>
+            <span className="marquee-chunk" aria-hidden="true">{TICKER.repeat(3)}</span>
           </div>
         </div>
       </header>
 
-      <main className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-3xl space-y-4 px-4 py-6">
+      <main className="flex-1 overflow-y-auto overscroll-contain">
+        <div className="mx-auto w-full max-w-3xl space-y-4 px-4 py-6">
           {messages.map((msg, i) => (
             <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[85%] whitespace-pre-line rounded-2xl px-4 py-3 text-sm leading-relaxed sm:max-w-[75%] sm:text-base ${
+              <div className={`max-w-[85%] break-words whitespace-pre-line rounded-2xl px-4 py-3 text-sm leading-relaxed sm:max-w-[75%] sm:text-base ${
                 msg.role === 'user'
                   ? 'rounded-br-sm bg-emerald-600 text-white'
                   : 'rounded-bl-sm bg-slate-800 text-slate-100'
@@ -241,17 +211,17 @@ export default function App() {
 
       <footer className="sticky bottom-0 border-t border-slate-800 bg-slate-900/90 backdrop-blur">
         {micError && (
-          <p className="mx-auto max-w-3xl px-4 pt-2 text-[11px] text-amber-400">{micError}</p>
+          <p className="mx-auto w-full max-w-3xl px-4 pt-2 text-[11px] leading-snug text-amber-400">{micError}</p>
         )}
         <form
           onSubmit={(e) => { e.preventDefault(); send(); }}
-          className="mx-auto flex max-w-3xl items-end gap-2 px-4 py-3"
+          className="mx-auto flex w-full max-w-3xl items-end gap-2 px-4 py-3"
         >
-          <div className="flex flex-col items-center gap-1">
+          <div className="flex shrink-0 flex-col items-center gap-1">
             <button
               type="button"
               onClick={toggleMic}
-              title={listening ? 'Stop and send' : 'Start voice input'}
+              aria-label={listening ? 'Stop recording and send' : 'Start voice input'}
               className={`flex h-11 w-11 items-center justify-center rounded-xl border text-lg transition ${
                 listening
                   ? 'animate-pulse border-red-500 bg-red-500/20 text-red-400'
@@ -263,7 +233,7 @@ export default function App() {
             <button
               type="button"
               onClick={() => setMicLang((l) => (l === 'en-US' ? 'bn-BD' : 'en-US'))}
-              title="Switch voice language"
+              aria-label="Switch voice language"
               className="rounded border border-slate-700 px-1 text-[9px] font-semibold text-slate-400 hover:text-white"
             >
               {micLang === 'en-US' ? 'EN' : 'বাং'}
@@ -277,10 +247,10 @@ export default function App() {
             }}
             rows={1}
             placeholder={listening ? 'Listening… speak now, tap ⏹ to send' : 'Ask about UAE law (English or Bangla)…'}
-            className="max-h-32 flex-1 resize-none rounded-xl border border-slate-700 bg-slate-800 px-4 py-3 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-emerald-500 sm:text-base"
+            className="max-h-32 min-w-0 flex-1 resize-none rounded-xl border border-slate-700 bg-slate-800 px-4 py-3 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-emerald-500 sm:text-base"
           />
           <button type="submit" disabled={loading || !input.trim()}
-            className="rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-40 sm:px-6">
+            className="shrink-0 rounded-xl bg-emerald-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:opacity-40 sm:px-6">
             Send
           </button>
         </form>
