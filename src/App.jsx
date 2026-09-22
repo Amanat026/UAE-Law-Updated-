@@ -8,8 +8,6 @@ const SUGGESTIONS = [
   'What is the probation period under MOHRE rules?',
 ];
 
-// Pick the right speech language based on what the user is typing, defaulting
-// to English. Bengali script detection for auto-switching.
 const SpeechRecognition =
   typeof window !== 'undefined'
     ? window.SpeechRecognition || window.webkitSpeechRecognition
@@ -29,12 +27,17 @@ export default function App() {
   const [micLang, setMicLang] = useState('en-US');
   const bottomRef = useRef(null);
   const recognitionRef = useRef(null);
+  const wantListeningRef = useRef(false);
+  const typedBaseRef = useRef(''); // text present when recording started
+  const finalTranscriptRef = useRef(''); // accumulated FINAL transcripts this session
+  const sendRef = useRef(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, loading]);
 
   useEffect(() => () => {
+    wantListeningRef.current = false;
     try { recognitionRef.current?.stop(); } catch {}
   }, []);
 
@@ -57,45 +60,66 @@ export default function App() {
       setLoading(false);
     }
   }
+  sendRef.current = send;
 
-  function stopListening() {
-    if (recognitionRef.current) {
-      try { recognitionRef.current.stop(); } catch {}
-      recognitionRef.current = null;
-    }
+  function stopListening({ autoSend = false } = {}) {
+    wantListeningRef.current = false;
+    const rec = recognitionRef.current;
+    recognitionRef.current = null;
     setListening(false);
+    if (rec) {
+      // onend fires synchronously on some browsers right after stop();
+      // compute and optionally auto-send the final transcript there.
+      rec.onend = () => {
+        const heard = finalTranscriptRef.current.trim();
+        if (autoSend && heard) {
+          finalTranscriptRef.current = '';
+          sendRef.current?.(heard);
+        }
+      };
+      try { rec.stop(); } catch {}
+    }
   }
 
   function toggleMic() {
     if (!micSupported) return;
     if (listening) {
-      stopListening();
+      // User pressed stop: if we heard something, send it automatically.
+      stopListening({ autoSend: true });
       return;
     }
     const rec = new SpeechRecognition();
     recognitionRef.current = rec;
+    wantListeningRef.current = true;
+    typedBaseRef.current = input;
+    finalTranscriptRef.current = '';
     rec.lang = micLang;
     rec.interimResults = true;
     rec.continuous = true;
     rec.maxAlternatives = 1;
 
     rec.onresult = (event) => {
-      let transcript = '';
+      let interim = '';
       for (let i = event.resultIndex; i < event.results.length; i++) {
-        transcript += event.results[i][0].transcript;
+        const r = event.results[i];
+        if (r.isFinal) {
+          finalTranscriptRef.current = (finalTranscriptRef.current + ' ' + r[0].transcript).trim();
+        } else {
+          interim += r[0].transcript;
+        }
       }
-      if (transcript) {
-        setInput((prev) => {
-          const base = prev && !prev.endsWith(' ') && prev.length ? prev + ' ' : prev;
-          return base + transcript;
-        });
-      }
+      // Rebuild the box from base + final + current interim each event:
+      // this never duplicates text and shows live transcription.
+      const pieces = [typedBaseRef.current.trim(), finalTranscriptRef.current, interim.trim()]
+        .filter(Boolean);
+      setInput(pieces.join(' '));
     };
-    rec.onerror = () => stopListening();
+    rec.onerror = (e) => {
+      if (e.error !== 'no-speech' && e.error !== 'aborted') stopListening();
+    };
     rec.onend = () => {
-      // If the user didn't press the button to stop, restart automatically
-      // (mobile browsers stop after silence) unless we intentionally stopped.
-      if (recognitionRef.current === rec && listening) {
+      // Auto-restart on silence timeouts while the user still wants to record.
+      if (wantListeningRef.current && recognitionRef.current === rec) {
         try { rec.start(); } catch { stopListening(); }
       } else {
         setListening(false);
@@ -108,6 +132,9 @@ export default function App() {
       stopListening();
     }
   }
+
+  const tickerText =
+    'আপনার প্রশ্নটি মেসেজ বক্সে করুন · Drop your message in the message box · আপনার প্রশ্নটি মেসেজ বক্সে করুন · Drop your message in the message box · ';
 
   return (
     <div className="flex h-full flex-col bg-slate-950">
@@ -126,10 +153,11 @@ export default function App() {
             Live
           </span>
         </div>
-        <div className="border-t border-slate-800/60 bg-slate-900/70 px-4 py-1.5 text-center">
-          <p className="text-[11px] leading-tight text-slate-300">
-            আপনার প্রশ্নটি মেসেজ বক্সে করুন · Drop your message in the message box
-          </p>
+        <div className="overflow-hidden border-t border-slate-800/60 bg-slate-900/70 py-1.5">
+          <div className="marquee-track">
+            <span className="mx-4 whitespace-nowrap text-[11px] leading-tight text-slate-300">{tickerText}</span>
+            <span className="mx-4 whitespace-nowrap text-[11px] leading-tight text-slate-300" aria-hidden="true">{tickerText}</span>
+          </div>
         </div>
       </header>
 
@@ -178,7 +206,7 @@ export default function App() {
               <button
                 type="button"
                 onClick={toggleMic}
-                title={listening ? 'Stop voice input' : 'Start voice input'}
+                title={listening ? 'Stop and send' : 'Start voice input'}
                 className={`flex h-11 w-11 items-center justify-center rounded-xl border text-lg transition ${
                   listening
                     ? 'animate-pulse border-red-500 bg-red-500/20 text-red-400'
@@ -204,7 +232,7 @@ export default function App() {
               if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
             }}
             rows={1}
-            placeholder={listening ? 'Listening… speak now' : 'Ask about UAE law (English or Bangla)…'}
+            placeholder={listening ? 'Listening… speak now, tap ⏹ to send' : 'Ask about UAE law (English or Bangla)…'}
             className="max-h-32 flex-1 resize-none rounded-xl border border-slate-700 bg-slate-800 px-4 py-3 text-sm text-slate-100 placeholder-slate-500 outline-none focus:border-emerald-500 sm:text-base"
           />
           <button type="submit" disabled={loading || !input.trim()}
