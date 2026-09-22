@@ -11,6 +11,10 @@ const SUGGESTIONS = [
 const TICKER =
   'আপনার প্রশ্নটি মেসেজ বক্সে করুন  •  Drop your message in the message box  •  ';
 
+// Bengali speech recognition: iOS often lacks bn-BD but has bn-IN or bn.
+// We try them in order until one starts without a language error.
+const BENGALI_LANGS = ['bn-BD', 'bn-IN', 'bn'];
+
 export default function App() {
   const [messages, setMessages] = useState([
     {
@@ -28,6 +32,7 @@ export default function App() {
   const recRef = useRef(null);
   const finalTextRef = useRef('');
   const autoSendRef = useRef(false);
+  const langTryRef = useRef(0);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -75,29 +80,22 @@ export default function App() {
     }
   }
 
-  function toggleMic() {
-    setMicError('');
-    if (listening) {
-      stopRecording(true); // stop + auto-send what was heard
-      return;
-    }
-
+  function startRecognition(lang, isRetry) {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) {
-      setMicError('Voice input is not supported in this browser. On iPhone use Safari, on other devices use Chrome.');
-      return;
-    }
-
     const rec = new SR();
     recRef.current = rec;
-    finalTextRef.current = '';
+    if (!isRetry) finalTextRef.current = '';
 
-    rec.lang = micLang;
+    rec.lang = lang;
     rec.interimResults = true;
-    rec.continuous = false; // most reliable on iOS Safari; onend restarts below
+    rec.continuous = false;
     rec.maxAlternatives = 1;
 
-    rec.onstart = () => setListening(true);
+    rec.onstart = () => {
+      langTryRef.current = 0;
+      setListening(true);
+      setMicError('');
+    };
 
     rec.onresult = (event) => {
       let interim = '';
@@ -115,6 +113,15 @@ export default function App() {
 
     rec.onerror = (event) => {
       const code = event?.error || '';
+      // Bengali fallback: try the next variant before giving up.
+      if (code === 'language-not-supported' && lang.startsWith('bn')) {
+        const next = BENGALI_LANGS[langTryRef.current];
+        if (next) {
+          langTryRef.current += 1;
+          startRecognition(next, true);
+          return;
+        }
+      }
       if (code === 'not-allowed' || code === 'service-not-allowed') {
         setMicError('Microphone blocked. On iPhone: Settings > Apps > Safari > Microphone > Allow, then retry.');
       } else if (code === 'network') {
@@ -122,7 +129,7 @@ export default function App() {
       } else if (code === 'audio-capture') {
         setMicError('No microphone found on this device.');
       } else if (code === 'language-not-supported') {
-        setMicError('This language is not supported on your device — switch EN/বাং and retry.');
+        setMicError('Bengali voice is not supported on this device/browser. English voice still works.');
       } else if (code !== 'no-speech' && code !== 'aborted') {
         setMicError('Voice input error (' + code + '). Please try again.');
       }
@@ -133,7 +140,6 @@ export default function App() {
     };
 
     rec.onend = () => {
-      // If still active, the engine just timed out on silence — restart it.
       if (recRef.current === rec) {
         try { rec.start(); return; } catch {}
       }
@@ -146,6 +152,27 @@ export default function App() {
       recRef.current = null;
       setMicError('Voice input could not start. Please try again.');
     }
+  }
+
+  function toggleMic() {
+    setMicError('');
+    if (listening) {
+      stopRecording(true); // stop + auto-send what was heard
+      return;
+    }
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      setMicError('Voice input is not supported in this browser. On iPhone use Safari, on other devices use Chrome.');
+      return;
+    }
+    startRecognition(micLang, false);
+  }
+
+  function switchLang() {
+    // Stop any active session first — changing lang mid-session can wedge the engine.
+    if (listening) stopRecording(false);
+    setMicError('');
+    setMicLang((l) => (l === 'en-US' ? 'bn-BD' : 'en-US'));
   }
 
   return (
@@ -166,7 +193,7 @@ export default function App() {
           </span>
         </div>
         {/* Scrolling marquee — full-width, clipped, never overflows */}
-        <div className="w-full overflow-hidden border-t border-slate-800/60 bg-slate-900/70" dir="ltr">
+        <div className="w-full overflow-hidden border-t border-slate-800/60 bg-slate-900/70 py-1" dir="ltr">
           <div className="marquee-track">
             <span className="marquee-chunk">{TICKER.repeat(3)}</span>
             <span className="marquee-chunk" aria-hidden="true">{TICKER.repeat(3)}</span>
@@ -232,7 +259,7 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => setMicLang((l) => (l === 'en-US' ? 'bn-BD' : 'en-US'))}
+              onClick={switchLang}
               aria-label="Switch voice language"
               className="rounded border border-slate-700 px-1 text-[9px] font-semibold text-slate-400 hover:text-white"
             >
