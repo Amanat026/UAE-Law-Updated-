@@ -1,6 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 
-const MODELS = ["gemini-2.0-flash", "gemini-2.0-flash-lite"];
+const MODELS = ["gemini-2.0-flash", "gemini-3.5-flash-lite"];
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
