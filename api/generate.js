@@ -1,36 +1,63 @@
 import { GoogleGenAI } from "@google/genai";
 
 /**
- * Smart Fallback & Model Rotation
- * --------------------------------
- * Models are tried in order. On quota/rate-limit (429), overload (503),
- * or a retired/missing model (404), the next model in the pool is used.
- * A per-attempt timeout prevents the function from hanging. If every model
- * fails, the client still receives a friendly answer (HTTP 200 with a
- * graceful message) instead of a crash.
+ * Smart Fallback & Model Rotation + Google Search Grounding
+ * ---------------------------------------------------------
+ * - Every model call uses Google Search grounding (tool: googleSearch) so
+ *   answers can cite real-time sources. The system instruction steers the
+ *   model toward Khaleej Times, Gulf News, MOHRE and Dubai Now.
+ * - Models are tried in order; quota (429), overload (503) and retired (404)
+ *   errors rotate to the next model automatically.
+ * - If every model fails, the client receives a CLEAR, user-friendly reason
+ *   explaining exactly why (quota / overload / safety block / auth / network),
+ *   never a silent crash.
  */
 const MODEL_POOL = [
-  "gemini-2.5-flash",        // primary free model
-  "gemini-2.0-flash",        // backup 1 — large free quota (~1500 req/day)
-  "gemini-3.5-flash-lite",   // backup 2 — lite variant, separate quota bucket
-  "gemini-3.6-flash",        // backup 3 — newest, small free quota but fine as last resort
+  "gemini-2.5-flash",      // primary — supports googleSearch grounding
+  "gemini-2.0-flash",      // backup 1 — grounding supported, large free quota
+  "gemini-3.5-flash-lite", // backup 2 — separate quota bucket
+  "gemini-3.6-flash",      // backup 3 — newest, small free quota
 ];
 
-const RETRY_DELAY_MS = 2500;      // pause before retrying the same model
-const ATTEMPTS_PER_MODEL = 2;     // one initial try + one retry per model
-const MODEL_TIMEOUT_MS = 45000;   // abort a hung model call so we can rotate
-const FALLBACK_MESSAGE =
-  "The AI service is temporarily busy. Please wait a moment and ask your question again — your message was received.";
+const RETRY_DELAY_MS = 2500;
+const ATTEMPTS_PER_MODEL = 2;
+const MODEL_TIMEOUT_MS = 45000;
 
-const SYSTEM_INSTRUCTION =
-  "You are an expert AI legal assistant specializing in UAE Laws. Users can ask questions in English or Bangla regarding UAE laws, labor rules (MOHRE), and Dubai regulations. Cross-verify information using up-to-date sources like Khaleej Times, Gulf News, Dubai Now, and MOHRE. Keep answers extremely concise, structured, and strictly within 3 to 5 lines (maximum 10 lines) optimized for mobile reading.";
+const SYSTEM_INSTRUCTION = [
+  "You are an expert AI legal assistant specializing in UAE Laws.",
+  "Users ask questions in English or Bangla about UAE laws, MOHRE labor rules, and Dubai regulations.",
+  "You have Google Search enabled: ALWAYS use it to verify facts against up-to-date sources,",
+  "preferring Khaleej Times (khaleejtimes.com), Gulf News (gulfnews.com), MOHRE (mohre.gov.ae) and Dubai Now.",
+  "When the user asks about news, updates, or recent changes, search specifically khaleejtimes.com and gulfnews.com and summarize what you find, naming the source.",
+  "Keep answers extremely concise, structured, and strictly within 3 to 5 lines (maximum 10 lines), optimized for mobile reading.",
+].join(" ");
 
-function classifyError(message) {
-  const m = message || "";
-  if (m.includes("429") || m.includes("RESOURCE_EXHAUSTED")) return "quota";
-  if (m.includes("503") || m.includes("UNAVAILABLE") || m.includes("high demand")) return "overload";
-  if (m.includes("404") || m.includes("NOT_FOUND") || m.includes("no longer available")) return "retired";
-  if (m.includes("401") || m.includes("403") || m.includes("UNAUTHENTICATED") || m.includes("PERMISSION_DENIED")) return "auth";
+// Translate raw Gemini/SDK failures into exact, user-friendly reasons.
+function explainFailure(message) {
+  const m = (message || "").toLowerCase();
+  if (m.includes("resource_exhausted") || m.includes("429") || m.includes("quota"))
+    return "The AI's free daily usage limit was reached. It resets automatically — please try again in a little while.";
+  if (m.includes("unavailable") || m.includes("503") || m.includes("high demand") || m.includes("overload"))
+    return "The AI service is temporarily overloaded on Google's side. Please try again in a few minutes.";
+  if (m.includes("safety") || m.includes("blocked") || m.includes("block_reason") || m.includes("harm"))
+    return "The question was blocked by the AI's safety filters, so it cannot be answered. Please rephrase it.";
+  if (m.includes("unauthenticated") || m.includes("401") || m.includes("permission_denied") || m.includes("403"))
+    return "The AI service key was rejected (configuration issue). The site owner needs to renew the API key.";
+  if (m.includes("not_found") || m.includes("404") || m.includes("no longer available"))
+    return "The AI model version is unavailable right now. Please try again shortly.";
+  if (m.includes("fetch") || m.includes("network") || m.includes("econn") || m.includes("timeout") || m.includes("model_timeout"))
+    return "The connection to the AI service timed out. Check your internet connection and try again.";
+  return "The AI could not answer this time due to a temporary technical issue. Please try again.";
+}
+
+function classify(message) {
+  const m = (message || "").toLowerCase();
+  if (m.includes("resource_exhausted") || m.includes("429")) return "quota";
+  if (m.includes("unavailable") || m.includes("503") || m.includes("high demand")) return "overload";
+  if (m.includes("not_found") || m.includes("404") || m.includes("no longer available")) return "retired";
+  if (m.includes("unauthenticated") || m.includes("401") || m.includes("permission_denied") || m.includes("403")) return "auth";
+  if (m.includes("safety") || m.includes("block_reason")) return "safety";
+  if (message === "MODEL_TIMEOUT") return "timeout";
   return "other";
 }
 
@@ -50,11 +77,11 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Missing prompt" });
   }
   if (!process.env.GEMINI_API_KEY) {
-    return res.status(500).json({ error: "SERVER_CONFIG: GEMINI_API_KEY env variable is not set on this Vercel project" });
+    return res.status(500).json({ error: "The AI service key is not configured on this deployment (GEMINI_API_KEY missing)." });
   }
 
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-  const errors = [];
+  const attempts = [];
 
   for (const model of MODEL_POOL) {
     for (let attempt = 0; attempt < ATTEMPTS_PER_MODEL; attempt++) {
@@ -63,38 +90,56 @@ export default async function handler(req, res) {
           ai.models.generateContent({
             model,
             contents: prompt,
-            config: { systemInstruction: SYSTEM_INSTRUCTION },
+            config: {
+              systemInstruction: SYSTEM_INSTRUCTION,
+              tools: [{ googleSearch: {} }], // Google Search grounding
+            },
           }),
           MODEL_TIMEOUT_MS
         );
-        const text = response && response.text;
-        if (text) {
-          return res.status(200).json({ text, model });
+
+        // Safety-block detection: candidates blocked by content filters.
+        const candidate = response?.candidates?.[0];
+        const blocked = candidate?.finishReason === "SAFETY" || response?.promptFeedback?.blockReason;
+        const text = response?.text;
+
+        if (!blocked && text) {
+          // Collect grounding sources (e.g. Khaleej Times / Gulf News links) when present.
+          const chunks = candidate?.groundingMetadata?.groundingChunks || [];
+          const sources = chunks
+            .map((c) => ({ title: c?.web?.title, uri: c?.web?.uri }))
+            .filter((s) => s.uri);
+          return res.status(200).json({ text, model, sources });
         }
-        // Empty answer — treat as a soft failure and rotate.
-        errors.push(model + ": empty response");
-        break;
+        attempts.push(model + ": " + (blocked ? "safety block" : "empty response"));
+        break; // next model
       } catch (error) {
         const message = error && error.message ? error.message : String(error);
-        const kind = message === "MODEL_TIMEOUT" ? "overload" : classifyError(message);
-        errors.push(model + ": " + kind);
+        const kind = classify(message);
+        attempts.push(model + ": " + kind);
 
-        // Auth problems won't be fixed by rotating — fail fast with a clear error.
         if (kind === "auth") {
           console.error("Gemini auth error:", message);
-          return res.status(500).json({ error: "GEMINI_AUTH: " + message });
+          return res.status(500).json({ error: explainFailure(message) });
         }
-        // Quota/overload/timeout: wait, then either retry same model or move on.
-        if (attempt < ATTEMPTS_PER_MODEL - 1 && (kind === "quota" || kind === "overload")) {
+        if (kind === "safety") {
+          return res.status(200).json({ text: explainFailure(message), degraded: true, reason: "safety" });
+        }
+        if (attempt < ATTEMPTS_PER_MODEL - 1 && (kind === "quota" || kind === "overload" || kind === "timeout")) {
           await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
           continue;
         }
-        break; // next model in the pool
+        break; // rotate to next model
       }
     }
   }
 
-  // Every model failed: degrade gracefully instead of crashing.
-  console.error("All Gemini models failed:", errors.join(" | "));
-  return res.status(200).json({ text: FALLBACK_MESSAGE, degraded: true });
+  // All models failed — report the exact reason in user-friendly language.
+  const lastKind = attempts.length ? attempts[attempts.length - 1].split(": ")[1] : "other";
+  console.error("All Gemini models failed:", attempts.join(" | "));
+  return res.status(200).json({
+    text: explainFailure(lastKind),
+    degraded: true,
+    reason: lastKind,
+  });
 }
