@@ -8,18 +8,17 @@ body {
   @apply bg-slate-950 text-slate-100 antialiased;
 }
 
-/* Full-width clipped marquee container lives in the JSX (w-full overflow-hidden).
-   Track is an inline flex, twice the chunk width, sliding -50% for a seamless loop. */
+/* Scrolling marquee — the track holds two identical chunks side by side
+   and slides left by exactly one chunk (-50%) for a seamless infinite loop. */
 .marquee-track {
-  display: inline-flex;
-  min-width: 200%;
+  display: flex;
+  width: max-content;
   white-space: nowrap;
-  animation: marquee-scroll 22s linear infinite;
-  will-change: transform;
+  animation: marquee-scroll 20s linear infinite;
 }
 
 .marquee-chunk {
-  flex: 1 0 50%;
+  flex-shrink: 0;
   display: inline-block;
   font-size: 11px;
   line-height: 1.6;
@@ -28,10 +27,6 @@ body {
 }
 
 @keyframes marquee-scroll {
-  0% { transform: translateX(0); }
-  100% { transform: translateX(-50%); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .marquee-track { animation: none; }
+  0% { transform: translate3d(0, 0, 0); }
+  100% { transform: translate3d(-50%, 0, 0); }
 }
