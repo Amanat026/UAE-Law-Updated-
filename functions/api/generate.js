@@ -2,14 +2,14 @@ import { GoogleGenAI } from "@google/genai";
 
 /**
  * Cloudflare Pages Function — mirrors api/generate.js (Vercel version).
- * Smart fallback & model rotation + Google Search grounding.
+ * Model pool contains only models currently available to new API keys
+ * (Google retired gemini-2.x for new accounts in 2026).
  * Served at /api/generate when deployed on Cloudflare Pages.
  */
 const MODEL_POOL = [
-  "gemini-2.5-flash",
-  "gemini-2.0-flash",
-  "gemini-3.5-flash-lite",
   "gemini-3.6-flash",
+  "gemini-3.5-flash-lite",
+  "gemini-3.5-flash",
 ];
 
 const RETRY_DELAY_MS = 2500;
