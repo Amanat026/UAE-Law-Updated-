@@ -3,22 +3,15 @@ import { GoogleGenAI } from "@google/genai";
 /**
  * Smart Fallback & Model Rotation + Google Search Grounding
  * ---------------------------------------------------------
- * - Every model call uses Google Search grounding (tool: googleSearch) so
- *   answers can cite real-time sources. The system instruction steers the
- *   model toward Khaleej Times, Gulf News, MOHRE and Dubai Now.
- * - Models are tried in order; quota (429), overload (503) and retired (404)
- *   errors rotate to the next model automatically.
- * - If every model fails, the client receives a CLEAR, user-friendly reason
- *   explaining exactly why (quota / overload / safety block / auth / network),
- *   never a silent crash.
- * - Pass { "debug": true } in the POST body to get the raw per-model errors
- *   for diagnosis instead of the friendly message.
+ * Model pool contains only models currently available to new API keys
+ * (Google retired gemini-2.x for new accounts in 2026). Quota (429),
+ * overload (503) and retired (404) errors rotate to the next model.
+ * Pass { "debug": true } in the POST body to get raw per-model errors.
  */
 const MODEL_POOL = [
-  "gemini-2.5-flash",      // primary — supports googleSearch grounding
-  "gemini-2.0-flash",      // backup 1 — grounding supported, large free quota
-  "gemini-3.5-flash-lite", // backup 2 — separate quota bucket
-  "gemini-3.6-flash",      // backup 3 — newest, small free quota
+  "gemini-3.6-flash",      // primary — current, works on new accounts
+  "gemini-3.5-flash-lite", // backup — separate quota bucket
+  "gemini-3.5-flash",      // backup 2
 ];
 
 const RETRY_DELAY_MS = 2500;
@@ -34,7 +27,6 @@ const SYSTEM_INSTRUCTION = [
   "Keep answers extremely concise, structured, and strictly within 3 to 5 lines (maximum 10 lines), optimized for mobile reading.",
 ].join(" ");
 
-// Translate raw Gemini/SDK failures into exact, user-friendly reasons.
 function explainFailure(message) {
   const m = (message || "").toLowerCase();
   if (m.includes("resource_exhausted") || m.includes("429") || m.includes("quota"))
@@ -95,19 +87,17 @@ export default async function handler(req, res) {
             contents: prompt,
             config: {
               systemInstruction: SYSTEM_INSTRUCTION,
-              tools: [{ googleSearch: {} }], // Google Search grounding
+              tools: [{ googleSearch: {} }],
             },
           }),
           MODEL_TIMEOUT_MS
         );
 
-        // Safety-block detection: candidates blocked by content filters.
         const candidate = response?.candidates?.[0];
         const blocked = candidate?.finishReason === "SAFETY" || response?.promptFeedback?.blockReason;
         const text = response?.text;
 
         if (!blocked && text) {
-          // Collect grounding sources (e.g. Khaleej Times / Gulf News links) when present.
           const chunks = candidate?.groundingMetadata?.groundingChunks || [];
           const sources = chunks
             .map((c) => ({ title: c?.web?.title, uri: c?.web?.uri }))
@@ -116,7 +106,7 @@ export default async function handler(req, res) {
         }
         attempts.push(model + ": " + (blocked ? "safety block" : "empty response"));
         rawErrors.push({ model, kind: blocked ? "safety" : "empty", message: blocked ? "blocked by safety filters" : "empty response" });
-        break; // next model
+        break;
       } catch (error) {
         const message = error && error.message ? error.message : String(error);
         const kind = classify(message);
@@ -134,12 +124,11 @@ export default async function handler(req, res) {
           await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
           continue;
         }
-        break; // rotate to next model
+        break;
       }
     }
   }
 
-  // All models failed — report the exact reason in user-friendly language.
   const lastKind = attempts.length ? attempts[attempts.length - 1].split(": ")[1] : "other";
   console.error("All Gemini models failed:", attempts.join(" | "));
   return res.status(200).json({
