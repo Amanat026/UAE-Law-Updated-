@@ -11,6 +11,8 @@ import { GoogleGenAI } from "@google/genai";
  * - If every model fails, the client receives a CLEAR, user-friendly reason
  *   explaining exactly why (quota / overload / safety block / auth / network),
  *   never a silent crash.
+ * - Pass { "debug": true } in the POST body to get the raw per-model errors
+ *   for diagnosis instead of the friendly message.
  */
 const MODEL_POOL = [
   "gemini-2.5-flash",      // primary — supports googleSearch grounding
@@ -72,7 +74,7 @@ export default async function handler(req, res) {
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
-  const { prompt } = req.body || {};
+  const { prompt, debug } = req.body || {};
   if (!prompt || typeof prompt !== "string") {
     return res.status(400).json({ error: "Missing prompt" });
   }
@@ -82,6 +84,7 @@ export default async function handler(req, res) {
 
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   const attempts = [];
+  const rawErrors = [];
 
   for (const model of MODEL_POOL) {
     for (let attempt = 0; attempt < ATTEMPTS_PER_MODEL; attempt++) {
@@ -112,18 +115,20 @@ export default async function handler(req, res) {
           return res.status(200).json({ text, model, sources });
         }
         attempts.push(model + ": " + (blocked ? "safety block" : "empty response"));
+        rawErrors.push({ model, kind: blocked ? "safety" : "empty", message: blocked ? "blocked by safety filters" : "empty response" });
         break; // next model
       } catch (error) {
         const message = error && error.message ? error.message : String(error);
         const kind = classify(message);
         attempts.push(model + ": " + kind);
+        rawErrors.push({ model, kind, message: message.slice(0, 400) });
 
         if (kind === "auth") {
           console.error("Gemini auth error:", message);
-          return res.status(500).json({ error: explainFailure(message) });
+          return res.status(500).json({ error: explainFailure(message), debug: debug ? rawErrors : undefined });
         }
         if (kind === "safety") {
-          return res.status(200).json({ text: explainFailure(message), degraded: true, reason: "safety" });
+          return res.status(200).json({ text: explainFailure(message), degraded: true, reason: "safety", debug: debug ? rawErrors : undefined });
         }
         if (attempt < ATTEMPTS_PER_MODEL - 1 && (kind === "quota" || kind === "overload" || kind === "timeout")) {
           await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
@@ -141,5 +146,6 @@ export default async function handler(req, res) {
     text: explainFailure(lastKind),
     degraded: true,
     reason: lastKind,
+    debug: debug ? rawErrors : undefined,
   });
 }
