@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { generateLawResponse } from './ai/client.js';
+import { saveChatToSupabase } from './supabaseClient.js';
 
 const SUGGESTIONS = [
   'What are my rights if I am terminated without notice in the UAE?',
@@ -52,6 +53,8 @@ export default function App() {
     try {
       const reply = await generateLawResponse(prompt);
       setMessages((m) => [...m, { role: 'assistant', text: reply }]);
+      // Persist the exchange to Supabase (fire-and-forget; never blocks the UI)
+      saveChatToSupabase(prompt, reply);
     } catch {
       setMessages((m) => [
         ...m,
